@@ -5,7 +5,8 @@ let switcherActive = false;
 let selectedIndex = 0;
 let dismissTimer = null;
 let activeTabInfos = null; // cached during a switcher session
-const DISMISS_DELAY = 800;
+let sessionTabId = null; // tab ID where the overlay is shown
+const DISMISS_DELAY = 1200;
 
 // --- Tab tracking ---
 
@@ -27,6 +28,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabHistory = tabHistory.filter((id) => id !== tabId);
   tabCache.delete(tabId);
+
+  if (switcherActive && activeTabInfos) {
+    const removedIdx = activeTabInfos.findIndex((t) => t.id === tabId);
+    if (removedIdx !== -1) {
+      activeTabInfos = activeTabInfos.filter((t) => t.id !== tabId);
+      if (activeTabInfos.length < 2) {
+        clearTimeout(dismissTimer);
+        activateSelected();
+        return;
+      }
+      if (selectedIndex >= activeTabInfos.length) {
+        selectedIndex = activeTabInfos.length - 1;
+      }
+    }
+  }
 });
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
@@ -51,7 +67,9 @@ async function cacheTab(tabId) {
       title: tab.title || "Untitled",
       favIconUrl: tab.favIconUrl || "",
     });
-  } catch {}
+  } catch (e) {
+    console.warn("tab-switcher: cacheTab failed", e);
+  }
 }
 
 // Initialize
@@ -67,11 +85,58 @@ chrome.tabs.query({}, (tabs) => {
   });
 });
 
+async function getCurrentTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab;
+}
+
 // --- Switcher logic ---
 
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "switch-to-last-tab") return;
-  if (tabHistory.length < 2) return;
+
+  if (tabHistory.length < 2) {
+    const tab = await getCurrentTab();
+    if (tab) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          world: "ISOLATED",
+          func: () => {
+            const toast = document.createElement("div");
+            toast.textContent = "No other tabs";
+            toast.setAttribute("role", "status");
+            toast.setAttribute("aria-live", "polite");
+            Object.assign(toast.style, {
+              position: "fixed",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              background: "rgba(40,40,40,0.92)",
+              color: "rgba(255,255,255,0.8)",
+              padding: "12px 24px",
+              borderRadius: "12px",
+              fontSize: "14px",
+              fontFamily: "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+              zIndex: "2147483647",
+              opacity: "0",
+              transition: "opacity 0.15s ease",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
+            });
+            document.body.appendChild(toast);
+            requestAnimationFrame(() => (toast.style.opacity = "1"));
+            setTimeout(() => {
+              toast.style.opacity = "0";
+              setTimeout(() => toast.remove(), 150);
+            }, 1000);
+          },
+        });
+      } catch (e) {
+        console.warn("tab-switcher: single-tab toast failed", e);
+      }
+    }
+    return;
+  }
 
   if (!switcherActive) {
     activeTabInfos = tabHistory
@@ -88,6 +153,7 @@ chrome.commands.onCommand.addListener(async (command) => {
     selectedIndex = 1;
     showOverlay(activeTabInfos, selectedIndex);
   } else {
+    if (!activeTabInfos) return;
     selectedIndex = (selectedIndex + 1) % activeTabInfos.length;
     updateOverlay(selectedIndex);
   }
@@ -97,18 +163,22 @@ chrome.commands.onCommand.addListener(async (command) => {
 });
 
 async function showOverlay(tabInfos, selectedIdx) {
-  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const currentTab = await getCurrentTab();
   if (!currentTab) return;
+  sessionTabId = currentTab.id;
 
   try {
     await chrome.scripting.executeScript({
-      target: { tabId: currentTab.id },
+      target: { tabId: sessionTabId },
+      world: "ISOLATED",
       func: injectOverlay,
-      args: [tabInfos, selectedIdx],
+      args: [tabInfos, selectedIdx, sessionTabId],
     });
-  } catch {
+  } catch (e) {
+    console.warn("tab-switcher: showOverlay failed", e);
     switcherActive = false;
     activeTabInfos = null;
+    sessionTabId = null;
     clearTimeout(dismissTimer);
     if (tabInfos[1]) {
       await chrome.tabs.update(tabInfos[1].id, { active: true });
@@ -117,36 +187,46 @@ async function showOverlay(tabInfos, selectedIdx) {
 }
 
 async function updateOverlay(selectedIdx) {
-  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!currentTab) return;
+  if (!sessionTabId) return;
 
   try {
     await chrome.scripting.executeScript({
-      target: { tabId: currentTab.id },
+      target: { tabId: sessionTabId },
+      world: "ISOLATED",
       func: (idx) => {
         const items = document.querySelectorAll("#__tab-switcher-overlay .tab-item");
-        items.forEach((el, i) => el.classList.toggle("selected", i === idx));
+        items.forEach((el, i) => {
+          const isSel = i === idx;
+          el.classList.toggle("selected", isSel);
+          el.setAttribute("aria-selected", String(isSel));
+        });
         items[idx]?.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
       },
       args: [selectedIdx],
     });
-  } catch {}
+  } catch (e) {
+    console.warn("tab-switcher: updateOverlay failed", e);
+  }
 }
 
 async function activateSelected() {
   const target = activeTabInfos?.[selectedIndex];
+  const overlayTabId = sessionTabId;
   switcherActive = false;
   selectedIndex = 0;
   activeTabInfos = null;
+  sessionTabId = null;
 
-  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (currentTab) {
+  if (overlayTabId) {
     try {
       await chrome.scripting.executeScript({
-        target: { tabId: currentTab.id },
+        target: { tabId: overlayTabId },
+        world: "ISOLATED",
         func: () => document.getElementById("__tab-switcher-overlay")?.remove(),
       });
-    } catch {}
+    } catch (e) {
+      console.warn("tab-switcher: overlay removal failed", e);
+    }
   }
 
   if (target) {
@@ -154,25 +234,28 @@ async function activateSelected() {
       await chrome.tabs.update(target.id, { active: true });
       const tab = await chrome.tabs.get(target.id);
       await chrome.windows.update(tab.windowId, { focused: true });
-    } catch {}
+    } catch (e) {
+      console.warn("tab-switcher: tab activation failed", e);
+    }
   }
 }
 
 // --- Injected overlay ---
 
-function injectOverlay(tabInfos, selectedIdx) {
+function injectOverlay(tabInfos, selectedIdx, currentTabId) {
   document.getElementById("__tab-switcher-overlay")?.remove();
 
   const overlay = document.createElement("div");
   overlay.id = "__tab-switcher-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-label", "Tab switcher");
 
   const style = document.createElement("style");
   style.textContent = [
     "#__tab-switcher-overlay {",
     "  position: fixed; inset: 0; z-index: 2147483647;",
     "  display: flex; align-items: center; justify-content: center;",
-    "  background: rgba(0,0,0,0.35);",
-    "  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);",
+    "  background: rgba(0,0,0,0.55);",
     "  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif;",
     "  animation: __ts-fadeIn 0.12s ease;",
     "}",
@@ -192,6 +275,9 @@ function injectOverlay(tabInfos, selectedIdx) {
     "}",
     "#__tab-switcher-overlay .tab-item.selected {",
     "  background: rgba(255,255,255,0.13); border-color: rgba(255,255,255,0.4);",
+    "}",
+    "#__tab-switcher-overlay .tab-item.current .tab-title::after {",
+    '  content: " (current)"; opacity: 0.5;',
     "}",
     "#__tab-switcher-overlay .tab-icon {",
     "  width: 48px; height: 48px; border-radius: 10px;",
@@ -214,10 +300,16 @@ function injectOverlay(tabInfos, selectedIdx) {
 
   const container = document.createElement("div");
   container.className = "switcher-container";
+  container.setAttribute("role", "listbox");
+  container.setAttribute("aria-label", "Recent tabs");
 
   tabInfos.forEach((tab, i) => {
+    const isSelected = i === selectedIdx;
+    const isCurrent = tab.id === currentTabId;
     const item = document.createElement("div");
-    item.className = "tab-item" + (i === selectedIdx ? " selected" : "");
+    item.className = "tab-item" + (isSelected ? " selected" : "") + (isCurrent ? " current" : "");
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(isSelected));
 
     const icon = document.createElement("div");
     icon.className = "tab-icon";
