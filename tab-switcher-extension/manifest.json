@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Last Tab Switcher",
+  "version": "2.0",
+  "description": "Press Ctrl+Shift+Space to cycle through recent tabs with a visual switcher",
+  "permissions": ["tabs", "scripting", "activeTab"],
+  "commands": {
+    "switch-to-last-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Space",
+        "mac": "Ctrl+Shift+Space"
+      },
+      "description": "Switch to last viewed tab"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
