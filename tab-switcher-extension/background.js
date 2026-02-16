@@ -6,7 +6,7 @@ let selectedIndex = 0;
 let dismissTimer = null;
 let activeTabInfos = null; // cached during a switcher session
 let sessionTabId = null; // tab ID where the overlay is shown
-const DISMISS_DELAY = 1200;
+const DISMISS_DELAY = 800;
 
 // --- Tab tracking ---
 
