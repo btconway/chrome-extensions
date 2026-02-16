@@ -18,7 +18,21 @@ chrome.commands.onCommand.addListener(async (command) => {
               showToast("✓ URL copied", "#333");
             })
             .catch(() => {
-              showToast("✗ Failed to copy URL", "#c0392b");
+              // Clipboard API can fail when user activation doesn't propagate
+              // to the injected script. Fall back to execCommand which is
+              // covered by the clipboardWrite permission.
+              const ta = document.createElement("textarea");
+              ta.value = url;
+              ta.style.position = "fixed";
+              ta.style.opacity = "0";
+              document.body.appendChild(ta);
+              ta.select();
+              const ok = document.execCommand("copy");
+              ta.remove();
+              showToast(
+                ok ? "✓ URL copied" : "✗ Failed to copy URL",
+                ok ? "#333" : "#c0392b"
+              );
             });
 
           function showToast(message, bg) {
